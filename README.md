@@ -4,7 +4,7 @@ A partnered university assignment to write a file transfer program from scratch 
 
 ## client.py
 
-A command line program that asks for 5 values from the user:
+A command line program that takes 5 arguments:
 * Filename to be read from server
 * Filename under which received file is to be stored locally
 * IP address or hostname of server (localhost if client is run on same machine)
