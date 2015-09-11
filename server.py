@@ -1,108 +1,305 @@
 """
-@title server.py
-@authour Cody Harrington (cah143), Josephine Lim (tcl44)
-@description Server program for COSC364. 
-May be optimised once completed, if there is time.
-http://www.python.org/doc/essays/list2str.html
-http://wiki.python.org/moin/PythonSpeed/PerformanceTips
+:title: server.py
+:author: Cody Harrington
+:description: Server program for the client to download files from
 """
-
+from time import clock
 from socket import *
-import os.path
-import argparse
+import os
+import sys
+import struct 
+import random
 
 class Server(object):
-    
     def __init__(self):
-        self.ip = 'localhost'
-        self.port = 5000
-        # Comment out the line above and uncomment the line below to test the
-        # server at the command line
-        #port_number = self.parse_arguments()
+        """Start up the server"""
+        # This must be the address that the server is running on
+        self.ip = gethostbyname(gethostname()) # Change this as needed
+        self.port, self.p_err = self.get_args()
         self.address = (self.ip, self.port)
-        self.buffer_ = 1024
-        
-        self.udp_socket = self.init_socket(self.address)
-        
+        self.buffer_ = 2048 # Change as needed
+        self.udp_socket = self.init_socket()
         self.epoch_number = self.get_epoch_number();
         self.handle_number = 0
+        self.context_record = {}
+        self.listen()
         
-        self.listen(self.address, self.packet_buffer)
+    
+    def get_args(self):
+        """
+        Gets the port number and packet error threshold value. from the command line.
         
-    def parse_arguments(self):
-        """Parses the port number at the command line. Returns port number."""
-        # Create an instance of the command line argument parser
-        parser = argparse.ArgumentParser(description='File server.')
-        # Set the parser to accept 1 integer argument
-        parser.add_argument('Port', metavar='p', type=int, nargs=1)
-        # Parse the command line argument into a variable
-        port = parser.parse_args()
+        Usage:
         
-        return port
+        server.py port p_err
+        
+        Where port is a number between 1024 and 60000, and p_err is a float
+        between 0 and 1.
+        """
+        try:
+            port = int(sys.argv[1])
+            p_err = float(sys.argv[2])
+        except ValueError:
+            print "Port must be a number only, and p_err must only be a float."
+            sys.exit("Usage:\n\nserver.py port p_err\n\nWhere port is a number between 1024 and 60000,\n and p_err is a float between 0 and 1")
+        except IndexError:
+            print "A port number and an error probability value p_err must be provided."
+            sys.exit("Usage:\n\nserver.py port p_err\n\nWhere port is a number between 1024 and 60000,\n and p_err is a float between 0 and 1")
+            
+        if any([port < 1024, port > 60000, p_err < 0, p_err > 1]):
+            print "Port must be between 1024 and 60000, and p_err must be between 0 and 1"
+            sys.exit("Usage:\n\nserver.py port p_err\n\nWhere port is a number between 1024 and 60000,\n and p_err is a float between 0 and 1")
+        else:
+            return port, p_err
+            
     
     def init_socket(self):
         """Creates socket for use. Returns an active UDP socket."""
-        # Create a UDP Socket
         udp_socket = socket(AF_INET, SOCK_DGRAM)
-        # Connect it to the local machine address on the specified port
         udp_socket.bind(self.address)
         udp_socket.setblocking(True)
         
         return udp_socket
+            
     
     def get_epoch_number(self):
         """
-        Checks to see if file "epoch.number" exists. If it doesn't, an
-        error is returned. Otherwise, the first line is read for a single 
-        integer, which is stored as the epoch number. This number is then
-        incremented by 1, and is written into the file over the old number
+        Checks to see if file "epoch.number" exists. If it doesn't, then 
+        epoch-number is set to 1, and stored in a file named "epoch.number"
+        Otherwise, the first line is read for a single integer, which is stored 
+        as the epoch number. This number is then incremented by 1, and is 
+        written into the file over the old number.
         """
-        if os.path.isfile('epoch.number'):
-            f = open('epoch.number', 'r+')
-            epoch_number = int(f.readline())
-            epoch_number += 1
-            f.write(str(epoch_number))
+        if not os.path.isfile('epoch.number'):
+            epoch_number = 1
+            f = open('epoch.number', 'w')
         else:
             f = open('epoch.number', 'r+')
-            epoch_number = '1'
-            f.write(epoch_number)
+            f_string = f.readline()
+        
+            if f_string.isdigit():
+                epoch_number = int(f_string)
+                epoch_number += 1
+            else:
+                epoch_number = 1
+                
+            f.seek(0)
             
+        f.write(str(epoch_number))
         f.close()
+        print "Retrieved epoch number: %d" % epoch_number
         
         return epoch_number
+    
             
-    def recv_open_request(self):
-        """Specifies what the server should do if an open-request is received"""
-        # To be completed
-        pass
+    def send_open_response(self, packet, recv_addr):
+        """
+        Parses an open-request, then replies with an appropriate open-response.
+        
+        Receives: 
+        file_name
+        
+        Sends:
+        Bit_signature packet_type status file_length epoch_number handle_number
+        """
+        print "Received open request from %s on port %d." % recv_addr
+        (f_name,) = struct.unpack('!100s', packet)
+        f_name = f_name.replace('\x00', "").strip()
+        
+        try: 
+            f_handle = open(f_name, "rb")
+            print "Opened file:", f_name
+            self.handle_number += 1
+            f_handle_no = self.handle_number
+            f_size = os.path.getsize(f_name)
+            ttl = 60
+            init_time = clock()
+            self.context_record[f_handle_no] = (f_handle, init_time, ttl)
+            self.update_context_record(f_handle_no)
+            status = True
+        except Exception as exception_:
+            print "Open response error:", exception_
+            status = False
+            f_size = 0
+            f_handle_no = 0
+            
+        print "Client %s given handle %d" % recv_addr, f_handle_no
+        response_packet = struct.pack("!2I?Q2I", 0b1101, 0b1000, status, f_size, self.epoch_number, f_handle_no)
+        self.udp_socket.sendto(response_packet, recv_addr)
+        print "Sent open response."
+        
     
-    def recv_read_request(self):
-        """Specifies what the server should do if a read-request is received"""
-        # To be completed
-        pass
+    def send_read_response(self, packet, recv_addr):
+        """
+        Parses a read-request, then replies with an appropriate read-response.
+        
+        Receives:
+        recv_epoch_number, recv_handle_number, read_start_pos, read_size
+        
+        Sends:
+        Bit_signature packet_type status epoch_number handle_number start_pos num_bytes_read bytes_read
+        """
+        buff_size = 0
+        read_buffer = 0
+        print "Received read request from %s on port %d." % recv_addr
+        (recv_epoch_number, recv_handle_number, read_start_pos, read_size) = struct.unpack("!4I", packet)
+        # Returns False if f_handle doesn't exist in the context record
+        f_handle = self.get_file_handle(recv_handle_number)
+        
+        if recv_epoch_number != self.epoch_number:
+            print "Epoch numbers do not match: Server = %d, Client = %d" % (self.epoch_number, recv_epoch_number)
+            status = 0b01
+        elif not f_handle:
+            print "Handle %d does not exist in context record." % recv_handle_number
+            status = 0b10
+        else:
+            status = 0b00
+            try:
+                print "Read from file at byte %d" % read_start_pos
+                f_handle.seek(read_start_pos)
+                read_buffer = f_handle.read(read_size)
+                buff_size = len(read_buffer)
+            except Exception as exception_:
+                print "Read response error:", exception_
+                status = 0b11
+                f_handle.close()
+            
+        response_header = struct.pack('!2IH3IQ', 0b1101, 0b0010, status, 
+                                      self.epoch_number, recv_handle_number, 
+                                      read_start_pos, buff_size)
+        
+        response_packet = response_header + read_buffer
+        
+        self.udp_socket.sendto(response_packet, recv_addr)
+        print "Sent read response."
     
-    def recv_close_request(self):
-        """Specifies what the server should do if a close-request is received"""
-        # To be completed
-        pass
     
-    def recv_invalid_request(self):
-        """Specifies what should happen should an invalid request be made"""
-        # To be completed
-        pass
+    def recv_close_request(self, packet, recv_addr):
+        """
+        Parses a close-request, then closes the file that was associated with
+        that client.
+      
+        Receives:
+        recv_epoch_number, recv_handle_number
+        """
+        print "Received close request from %s on port %d." % recv_addr
+        (recv_epoch_number, recv_handle_number) = struct.unpack("!2I", packet)
+        
+        f_handle = self.get_file_handle(recv_handle_number)
+        
+        if recv_epoch_number != self.epoch_number:
+            print "Close error:\nEpoch numbers do not match: Server = %d, Client = %d"
+            return
+        elif not f_handle:
+            print "Close error: Handle %d does not exist in context record" % recv_handle_number
+            return
+        else:
+            try:
+                print "Closing file:", f_handle
+                f_handle.close()
+            except Exception as exception_:
+                print "Close error:", exception_
+            
+        
+    def recv_invalid_request(self, packet, recv_addr):
+        """
+        Prints a message informing of an invalid packet, and then drops the
+        packet.
+        """ 
+        print "Received invalid request from %s on port %d" % recv_addr
+        print "Packet data (%d bytes)\n---START---" % len(packet)
+        print packet
+        print "---END---"
+        
+        packet = None
+        
+        print "Dropped packet."
+        
     
+    def update_context_record(self, handle_number):
+        """
+        The corresponding timeout value of the handle 'handle_number' is reset.
+        
+        The entire record is iterated through, and any records that are older 
+        than their time_to_live value are deleted.
+        """
+        records = self.context_record.iteritems()
+        expiry_list = []
+        for key, (f_han, i_time, time_tl) in records:
+            if (clock() - i_time) > time_tl:
+                print "Handle %d has timed out." % key
+                expiry_list.append(key)
+                
+        (f_han, i_time, time_tl) = self.context_record.get(handle_number)
+        i_time = clock()
+        self.context_record[handle_number] = (f_han, i_time, time_tl)
+        for key in expiry_list:
+            print "Deleting handle %d." % key
+            del self.context_record[key]
+
+            
+    def get_file_handle(self, handle_number):
+        """
+        Receives a handle number and fetches the corresponding handle from the 
+        context record. If the handle doesn't exist, return False.
+        """
+        if self.context_record.has_key(handle_number):
+            self.update_context_record(handle_number)
+            (f_handle, init_time, ttl) = self.context_record[handle_number]
+            return f_handle
+        else:
+            return False
+        
+        
+    def parse_recv_data(self, packet_bytes, recv_addr):
+        """
+        When a packet is received, it is stripped of the header, and then the 
+        payload is sent to the corresponding function to be processed, based on 
+        the request_type field.
+        
+        The bit signature is 1101 = 13 = \x00\x00\x00\r
+        
+        Packet type values:
+        1 = 0b0001 = read request = \x00\x00\x00\x01
+        2 = 0b0010 = read response = \x00\x00\x00\x02
+        4 = 0b0100 = open request = \x00\x00\x00\x04
+        8 = 0b1000 = open response = \x00\x00\x00\x08
+        9 = 0b1001 = close request = \x00\x00\x00\x09
+        """
+        bit_signature = packet_bytes[:4]
+        request_type = packet_bytes[4:8]
+        payload = packet_bytes[8:]
+        
+        # Bit signature of 13 to identify our packets
+        if bit_signature != "\x00\x00\x00\r":
+            self.recv_invalid_request(packet_bytes, recv_addr)
+        else:
+            if request_type == "\x00\x00\x00\x09": # Type 1001
+                self.recv_close_request(payload, recv_addr)
+            elif request_type == "\x00\x00\x00\x01": # Type 0001
+                self.send_read_response(payload, recv_addr)
+            elif request_type == "\x00\x00\x00\x04": # Type 0100
+                self.send_open_response(payload, recv_addr)
+            else:
+                self.recv_invalid_request(packet_bytes, recv_addr)
+                
+        
     def listen(self):
         """
         Enters into an infinite loop and listens on the specified UDP socket.
+        If there is a packet, it is passed to a receiver function.
+        Drops a packet if the random error value > p_err.
         """
+        print ("Listening at address %s on port %d." % (self.ip, self.port))
         while (1):
-            print ("Listening at address %s on port %d" % (self.ip, self.port))
-            # Listen for data
-            packet_data = self.udp_socket.recv(self.buffer_)
-            # When data is received
-            if packet_data:
-                # Need to specify how a packet request is structured
-                pass
+            (packet_bytes, recv_addr) = self.udp_socket.recvfrom(self.buffer_)
+            if packet_bytes and (random.uniform(0,1) >= self.p_err):
+                self.parse_recv_data(packet_bytes, recv_addr)
+            else:
+                packet_bytes = None
+                print "Packet errors too high. Dropped packet."
+                continue
+                
             
             
 server_process = Server()
